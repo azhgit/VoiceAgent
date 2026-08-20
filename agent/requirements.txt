@@ -1,0 +1,2 @@
+pipecat-ai[deepgram,elevenlabs,anthropic,silero,websocket,runner]
+python-dotenv
