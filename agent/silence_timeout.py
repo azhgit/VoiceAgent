@@ -32,11 +32,25 @@ class SilenceTimeoutProcessor(FrameProcessor):
     speaking (UserStartedSpeakingFrame), not on BotStoppedSpeakingFrame -
     otherwise the check-in's own TTS turn would reset it and stage 2
     (goodbye) would never be reachable.
+
+    BotStoppedSpeakingFrame itself fires when the TTS service finishes
+    *generating* audio (on TTSStoppedFrame, see pipecat's
+    transports/base_output.py), not when the transport has finished
+    *sending/playing* it - for a longer reply, generation typically
+    finishes before playback does, so the window would otherwise start
+    while the caller can still hear the bot talking. playback_grace_secs
+    adds a one-off buffer to the first wait after the bot stops, as a
+    best-effort compensation (not a precise fix - there's no signal here
+    for "the caller has actually finished hearing this").
     """
 
-    def __init__(self, *, timeout_secs: float = 8.0, **kwargs):
+    def __init__(
+        self, *, timeout_secs: float = 8.0, playback_grace_secs: float = 1.5, **kwargs
+    ):
         super().__init__(**kwargs)
         self._timeout_secs = timeout_secs
+        self._playback_grace_secs = playback_grace_secs
+        self._next_wait_secs = timeout_secs
         self._triggers = 0
         self._bot_speaking = False
         self._activity_event = asyncio.Event()
@@ -49,13 +63,17 @@ class SilenceTimeoutProcessor(FrameProcessor):
             self._timeout_task = self.create_task(self._watch())
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._triggers = 0
+            self._next_wait_secs = self._timeout_secs
             self._activity_event.set()
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
             self._activity_event.set()  # don't let a timeout land mid-speech
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
-            self._activity_event.set()  # caller's silence window starts now
+            # First wait after a bot turn gets extra slack for any audio
+            # still draining out; later waits during genuine silence don't.
+            self._next_wait_secs = self._timeout_secs + self._playback_grace_secs
+            self._activity_event.set()
 
         await self.push_frame(frame, direction)
 
@@ -65,8 +83,10 @@ class SilenceTimeoutProcessor(FrameProcessor):
 
     async def _watch(self):
         while True:
+            wait_secs = self._next_wait_secs
+            self._next_wait_secs = self._timeout_secs
             try:
-                await asyncio.wait_for(self._activity_event.wait(), timeout=self._timeout_secs)
+                await asyncio.wait_for(self._activity_event.wait(), timeout=wait_secs)
                 self._activity_event.clear()
             except TimeoutError:
                 if self._bot_speaking:
