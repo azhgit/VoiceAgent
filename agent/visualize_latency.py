@@ -27,11 +27,15 @@ def load_rows() -> list[dict]:
     if not LATENCY_LOG_PATH.exists():
         return []
     rows = []
-    with open(LATENCY_LOG_PATH) as f:
-        for line in f:
+    with open(LATENCY_LOG_PATH, encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"Skipping malformed JSON on line {line_no} in {LATENCY_LOG_PATH}")
     return rows
 
 
