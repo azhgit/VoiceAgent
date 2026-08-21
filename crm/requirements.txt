@@ -3,3 +3,7 @@ uvicorn[standard]
 sqlalchemy
 python-dotenv
 python-multipart
+
+# test-only
+pytest
+httpx2
