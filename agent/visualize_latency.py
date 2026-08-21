@@ -7,6 +7,8 @@ visualize_latency.py
 import json
 from collections import defaultdict
 
+import matplotlib
+matplotlib.use("Agg")  # headless-friendly backend for PNG output
 import matplotlib.pyplot as plt
 
 from latency_observer import LATENCY_LOG_PATH
