@@ -5,4 +5,5 @@ venv/
 .env
 *.db
 *.jsonl
+latency_chart.png
 .DS_Store
