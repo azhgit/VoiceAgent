@@ -15,10 +15,21 @@ from latency_observer import LATENCY_LOG_PATH
 
 STAGE_ORDER = ["STT", "LLM", "TTS"]
 
+# Matched by vendor prefix, not by searching for "STT"/"TTS" as a substring
+# of the class name: "ElevenLabsTTSService" and "DeepgramSTTService" both
+# contain the run "STTS", which contains both "STT" and "TTS" as
+# substrings, so a naive substring check misclassifies TTS as STT
+# regardless of check order.
+PROCESSOR_PREFIXES = {
+    "Deepgram": "STT",
+    "Anthropic": "LLM",
+    "ElevenLabs": "TTS",
+}
+
 
 def friendly_stage(processor: str) -> str:
-    for stage in STAGE_ORDER:
-        if stage in processor.upper():
+    for prefix, stage in PROCESSOR_PREFIXES.items():
+        if processor.startswith(prefix):
             return stage
     return processor
 
