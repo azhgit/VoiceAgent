@@ -48,18 +48,27 @@ def main():
         )
         return
 
-    by_stage = defaultdict(list)
+    by_stage_metric = defaultdict(list)
     for row in rows:
-        by_stage[friendly_stage(row["processor"])].append(row["value_s"] * 1000)
+        processor = row.get("processor")
+        value_s = row.get("value_s")
+        if processor is None or value_s is None:
+            continue
+        by_stage_metric[(friendly_stage(processor), str(row.get("stage", "unknown")).upper())].append(
+            value_s * 1000
+        )
 
-    labels = [s for s in STAGE_ORDER if s in by_stage] + [
-        s for s in by_stage if s not in STAGE_ORDER
+    ordered_groups = [
+        group for stage in STAGE_ORDER for group in sorted(by_stage_metric) if group[0] == stage
+    ] + [
+        group for group in sorted(by_stage_metric) if group[0] not in STAGE_ORDER
     ]
-    averages = [sum(by_stage[label]) / len(by_stage[label]) for label in labels]
-    call_count = len({row["call_id"] for row in rows})
+    labels = [f"{stage} ({metric})" for stage, metric in ordered_groups]
+    averages = [sum(by_stage_metric[group]) / len(by_stage_metric[group]) for group in ordered_groups]
+    call_count = len({row.get("call_id") for row in rows if row.get("call_id")})
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    bars = ax.bar(labels, averages, color=["#4C72B0", "#DD8452", "#55A868"][: len(labels)])
+    bars = ax.bar(labels, averages, color=[plt.cm.tab10(i % 10) for i in range(len(labels))])
     for bar, avg in zip(bars, averages):
         ax.annotate(
             f"{avg:.0f}ms",
@@ -68,7 +77,7 @@ def main():
             textcoords="offset points",
             ha="center",
         )
-    ax.set_ylabel("Avg time-to-first-byte/audio (ms)")
+    ax.set_ylabel("Avg latency (ms)")
     ax.set_title(f"Pipeline latency by stage ({call_count} call(s), {len(rows)} samples)")
     fig.tight_layout()
 
