@@ -25,6 +25,7 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.workers.runner import WorkerRunner
 
 from latency_observer import LatencyLogObserver
+from silence_timeout import SilenceTimeoutProcessor
 
 load_dotenv(override=True)
 
@@ -219,7 +220,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         [
             transport.input(),
             stt,
-            user_aggregator,
+            user_aggregator,  # emits UserStartedSpeakingFrame - must come before the watcher below
+            SilenceTimeoutProcessor(),
             llm,
             tts,
             transport.output(),
