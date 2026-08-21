@@ -6,7 +6,12 @@ from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    FunctionCallResultProperties,
+    LLMRunFrame,
+    TTSSpeakFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -14,6 +19,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.anthropic.llm import AnthropicLLMService
@@ -24,6 +30,7 @@ from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.workers.runner import WorkerRunner
 
+from call_transfer import TRANSFER_MESSAGES
 from latency_observer import LatencyLogObserver
 from silence_timeout import SilenceTimeoutProcessor
 
@@ -66,14 +73,21 @@ SYSTEM_INSTRUCTION = (
     "outdoor temps, a gas smell, or sewage backup.\n"
     "   - urgency 'non_urgent': a dripping faucet, no hot water, an unusual "
     "noise, or routine maintenance.\n"
-    "2. Call check_availability with that specialty and urgency. Read the "
-    "caller exactly the slots it returns as concrete options (e.g. "
+    "   If what they said doesn't make sense or doesn't sound like a "
+    "plumbing/HVAC problem, ask them to repeat it once. If it's still "
+    "unclear the second time, call transfer_and_end_call with reason "
+    "'cannot_understand_caller' instead of continuing to guess.\n"
+    "2. Call check_availability with that specialty and urgency. If it "
+    "returns slots, read them back exactly as concrete options (e.g. "
     "'Tuesday at 2pm with Mike, or Wednesday at 10am with Dana') - never "
-    "invent a time yourself. If it returns no slots, apologize and tell "
-    "them someone will call back to schedule.\n"
-    "3. Once the caller picks one, get their name and phone number, call "
-    "book_appointment with that exact slot, and read back the confirmed "
-    "time and technician name to close the call.\n"
+    "invent a time yourself. If it returns no slots:\n"
+    "   - urgent: call transfer_and_end_call with reason "
+    "'urgent_no_availability'.\n"
+    "   - non_urgent: tell them nothing's open in the next week, but "
+    "someone will call back as soon as a slot opens up.\n"
+    "3. Once the caller picks a slot, get their name and phone number, "
+    "call book_appointment with that exact slot, and read back the "
+    "confirmed time and technician name to close the call.\n"
 )
 KICKOFF_MESSAGE = (
     "The caller just connected. Greet them in one short sentence as the "
@@ -135,6 +149,23 @@ def build_tool_schemas() -> list[FunctionSchema]:
                 },
             },
             required=["technician_id", "time_slot", "customer_name", "customer_phone", "urgency"],
+        ),
+        FunctionSchema(
+            name="transfer_and_end_call",
+            description=(
+                "Simulate transferring the caller to a live dispatcher: speaks a "
+                "fixed transfer line, then ends the call. No real dialing happens - "
+                "use this instead of continuing the conversation once one of the "
+                "listed situations applies."
+            ),
+            properties={
+                "reason": {
+                    "type": "string",
+                    "enum": list(TRANSFER_MESSAGES.keys()),
+                    "description": "Why the call is being transferred.",
+                },
+            },
+            required=["reason"],
         ),
     ]
 
@@ -199,8 +230,23 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             return
         await params.result_callback({"appointment": response.json()})
 
+    async def transfer_and_end_call(params: FunctionCallParams):
+        # Speaks the transfer line and ends the call directly, rather than
+        # letting the LLM narrate its own transfer message and hoping to
+        # catch "it finished speaking" later - same push-then-EndFrame
+        # pattern SilenceTimeoutProcessor uses for its goodbye, which keeps
+        # frame ordering (audio before hangup) a single actor's problem.
+        reason = params.arguments["reason"]
+        message = TRANSFER_MESSAGES[reason]
+        await llm.push_frame(TTSSpeakFrame(text=message), FrameDirection.DOWNSTREAM)
+        await llm.push_frame(EndFrame(reason=reason), FrameDirection.DOWNSTREAM)
+        await params.result_callback(
+            {"transferred": True}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+
     llm.register_function("check_availability", check_availability)
     llm.register_function("book_appointment", book_appointment)
+    llm.register_function("transfer_and_end_call", transfer_and_end_call)
 
     tools = build_tool_schemas()
 
@@ -209,6 +255,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # is a one-time kickoff instruction, not the persistent system prompt
     # (that's SYSTEM_INSTRUCTION above, passed via Settings).
     context = LLMContext([{"role": "user", "content": KICKOFF_MESSAGE}], tools=tools)
+    # Hard-stop barge-in (plan's Day 3 requirement) is Pipecat's own default
+    # here, not something built for this project: the VAD-based turn-start
+    # strategy has enable_interruptions=True by default, and
+    # TTSService._handle_interruption discards all pending/queued state on
+    # InterruptionFrame rather than buffering it for resume - verified by
+    # reading pipecat's source (turns/user_start/base_user_turn_start_strategy.py,
+    # services/tts_service.py), not by a live call. Would need
+    # user_turn_strategies=... here to change.
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
