@@ -61,8 +61,23 @@ def create_appointment(payload: AppointmentCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=422, detail=f"Invalid urgency: {payload.urgency}")
     if db.get(Technician, payload.technician_id) is None:
         raise HTTPException(status_code=404, detail="Technician not found")
-    # Day 1: no conflict/overlap check against existing bookings or working
-    # hours here - that's the "available slots" business logic, not Day 0 CRUD.
+    # App-level check-then-insert, not a DB constraint - there's a small race
+    # window under concurrent requests. Fine at demo scale (single process);
+    # if that changes, replace with a partial unique index on
+    # (technician_id, time_slot) WHERE status='booked'.
+    conflict = (
+        db.query(Appointment)
+        .filter(
+            Appointment.technician_id == payload.technician_id,
+            Appointment.time_slot == payload.time_slot,
+            Appointment.status == "booked",
+        )
+        .first()
+    )
+    if conflict is not None:
+        raise HTTPException(
+            status_code=409, detail="Technician is already booked for that time slot"
+        )
     appointment = Appointment(**payload.model_dump())
     db.add(appointment)
     db.commit()

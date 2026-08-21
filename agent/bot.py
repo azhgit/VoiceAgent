@@ -1,7 +1,9 @@
 import os
 
+import httpx
 from dotenv import load_dotenv
 from loguru import logger
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
@@ -16,21 +18,44 @@ from pipecat.runner.utils import create_transport
 from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
-# Day 0 placeholder only - proves STT -> LLM -> TTS and the 8kHz mulaw round
-# trip. Real dispatch prompt / urgency rule / CRM tool schema land Day 1.
+CRM_BASE_URL = os.getenv("CRM_BASE_URL", "http://localhost:8000")
+
+# Day 1: real dispatch prompt with fixed urgency/specialty classification
+# rules (see doc/voice-agent-poc-plan.md) - the caller never gets asked to
+# self-classify, the agent decides from what they describe.
 SYSTEM_INSTRUCTION = (
-    "You are a phone test assistant. Keep every reply under two sentences - "
-    "this is a latency test, not a conversation."
+    "You are the after-hours dispatch line for a plumbing and HVAC company. "
+    "Keep every reply to one or two short sentences - this is a phone call, "
+    "not a chat.\n\n"
+    "For every caller:\n"
+    "1. Ask what's wrong if they haven't said, then classify BOTH the "
+    "specialty and the urgency from their description. Use these fixed "
+    "rules, don't improvise:\n"
+    "   - specialty: 'plumbing' for water/pipe/drain issues, 'hvac' for "
+    "heating/cooling/air issues.\n"
+    "   - urgency 'urgent': active water damage, no heat with near-freezing "
+    "outdoor temps, a gas smell, or sewage backup.\n"
+    "   - urgency 'non_urgent': a dripping faucet, no hot water, an unusual "
+    "noise, or routine maintenance.\n"
+    "2. Call check_availability with that specialty and urgency. Read the "
+    "caller exactly the slots it returns as concrete options (e.g. "
+    "'Tuesday at 2pm with Mike, or Wednesday at 10am with Dana') - never "
+    "invent a time yourself. If it returns no slots, apologize and tell "
+    "them someone will call back to schedule.\n"
+    "3. Once the caller picks one, get their name and phone number, call "
+    "book_appointment with that exact slot, and read back the confirmed "
+    "time and technician name to close the call.\n"
 )
 KICKOFF_MESSAGE = (
-    "The caller just connected. Greet them in one short sentence, then wait "
-    "for them to speak and briefly repeat back whatever they say."
+    "The caller just connected. Greet them in one short sentence as the "
+    "after-hours plumbing/HVAC dispatch line, then ask what's going on."
 )
 
 
@@ -54,11 +79,105 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
+    crm_client = httpx.AsyncClient(base_url=CRM_BASE_URL, timeout=5.0)
+
+    async def check_availability(params: FunctionCallParams):
+        specialty = params.arguments["specialty"]
+        urgency = params.arguments["urgency"]
+        try:
+            response = await crm_client.get(
+                "/availability", params={"specialty": specialty, "urgency": urgency}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.error(f"CRM availability lookup failed: {e}")
+            await params.result_callback({"error": "crm_unavailable"})
+            return
+        await params.result_callback({"slots": response.json()})
+
+    async def book_appointment(params: FunctionCallParams):
+        args = params.arguments
+        try:
+            response = await crm_client.post(
+                "/appointments",
+                json={
+                    "technician_id": args["technician_id"],
+                    "time_slot": args["time_slot"],
+                    "customer_name": args["customer_name"],
+                    "customer_phone": args["customer_phone"],
+                    "urgency": args["urgency"],
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            # Includes 409 slot-conflict responses from the CRM - surfaced to
+            # the LLM as a generic failure rather than a distinct "recheck
+            # availability" signal. Fine for now; revisit if this shows up in
+            # real calls.
+            logger.error(f"CRM booking failed: {e}")
+            await params.result_callback({"error": "booking_failed"})
+            return
+        await params.result_callback({"appointment": response.json()})
+
+    llm.register_function("check_availability", check_availability)
+    llm.register_function("book_appointment", book_appointment)
+
+    tools = [
+        FunctionSchema(
+            name="check_availability",
+            description=(
+                "Look up available appointment slots for a technician specialty "
+                "and urgency. Returns a short list of concrete slots to read back "
+                "to the caller verbatim."
+            ),
+            properties={
+                "specialty": {
+                    "type": "string",
+                    "enum": ["plumbing", "hvac"],
+                    "description": "Which trade the issue falls under.",
+                },
+                "urgency": {
+                    "type": "string",
+                    "enum": ["urgent", "non_urgent"],
+                    "description": "Urgency classified per the fixed dispatch rules.",
+                },
+            },
+            required=["specialty", "urgency"],
+        ),
+        FunctionSchema(
+            name="book_appointment",
+            description=(
+                "Book one of the slots previously returned by check_availability "
+                "for the caller."
+            ),
+            properties={
+                "technician_id": {
+                    "type": "integer",
+                    "description": "technician_id from the chosen check_availability slot.",
+                },
+                "time_slot": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 timestamp of the chosen slot, exactly as returned "
+                        "by check_availability."
+                    ),
+                },
+                "customer_name": {"type": "string"},
+                "customer_phone": {"type": "string"},
+                "urgency": {
+                    "type": "string",
+                    "enum": ["urgent", "non_urgent"],
+                },
+            },
+            required=["technician_id", "time_slot", "customer_name", "customer_phone", "urgency"],
+        ),
+    ]
+
     # Seeded as a "user" turn, not "system": Anthropic's context requires the
     # message list to start with a real conversational role, and this message
     # is a one-time kickoff instruction, not the persistent system prompt
     # (that's SYSTEM_INSTRUCTION above, passed via Settings).
-    context = LLMContext([{"role": "user", "content": KICKOFF_MESSAGE}])
+    context = LLMContext([{"role": "user", "content": KICKOFF_MESSAGE}], tools=tools)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -95,6 +214,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         await worker.cancel()
+        await crm_client.aclose()
 
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint, force_gc=True)
     await runner.add_workers(worker)
