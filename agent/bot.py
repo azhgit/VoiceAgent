@@ -23,6 +23,8 @@ from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.workers.runner import WorkerRunner
 
+from latency_observer import LatencyLogObserver
+
 load_dotenv(override=True)
 
 CRM_BASE_URL = os.getenv("CRM_BASE_URL", "http://localhost:8000")
@@ -200,9 +202,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         params=PipelineParams(
             audio_in_sample_rate=8000,  # Twilio Media Streams: 8kHz mulaw
             audio_out_sample_rate=8000,
-            enable_metrics=True,  # first latency-instrumentation hook (Day 2 builds on this)
+            enable_metrics=True,  # feeds the TTFB/TTFA frames LatencyLogObserver reads
             enable_usage_metrics=True,
         ),
+        observers=[LatencyLogObserver()],
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
 
