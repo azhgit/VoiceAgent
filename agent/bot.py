@@ -86,8 +86,11 @@ SYSTEM_INSTRUCTION = (
     "   - non_urgent: tell them nothing's open in the next week, but "
     "someone will call back as soon as a slot opens up.\n"
     "3. Once the caller picks a slot, get their name and phone number, "
-    "call book_appointment with that exact slot, and read back the "
-    "confirmed time and technician name to close the call.\n"
+    "then read both back and get an explicit yes before booking - "
+    "STT can mishear a name or a digit and there'd be no other way to "
+    "catch it. Only after they confirm, call book_appointment with that "
+    "exact slot, and read back the confirmed time and technician name "
+    "to close the call.\n"
 )
 KICKOFF_MESSAGE = (
     "The caller just connected. Greet them in one short sentence as the "
