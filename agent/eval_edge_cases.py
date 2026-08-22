@@ -93,9 +93,12 @@ def check_non_urgent_no_availability(client, tools) -> bool:
     messages.append(tool_result(call1, {"slots": []}))
     resp2 = ask(client, tools, messages)
     call2 = first_tool_use(resp2)
-    ok = call2 is None or call2.name != "transfer_and_end_call"
+    ok = bool(call2 and call2.name == "end_call")
     if not ok:
-        print(f"  FAIL: non-urgent no-availability should not transfer, got {call2.name}")
+        print(
+            f"  FAIL: expected the callback-promise line + end_call in the same turn, "
+            f"got {call2.name if call2 else None}"
+        )
     return ok
 
 
@@ -191,6 +194,33 @@ def check_confirms_name_and_phone_before_booking(client, tools) -> bool:
         print(
             f"  FAIL: expected book_appointment with the confirmed name/phone, got "
             f"{call4.name if call4 else None} {call4.input if call4 else ''}"
+        )
+        return False
+
+    messages.append({"role": "assistant", "content": resp4.content})
+    messages.append(
+        tool_result(
+            call4,
+            {
+                "appointment": {
+                    "id": 1,
+                    "technician_id": 1,
+                    "time_slot": "2030-06-10T09:00:00",
+                    "customer_name": "Jamie Rivera",
+                    "customer_phone": "555-042-8871",
+                    "urgency": "non_urgent",
+                    "status": "booked",
+                }
+            },
+        )
+    )
+    resp5 = ask(client, tools, messages)
+    call5 = first_tool_use(resp5)
+    ok = bool(call5 and call5.name == "end_call")
+    if not ok:
+        print(
+            f"  FAIL: expected the booking-confirmed line + end_call in the same turn, "
+            f"got {call5.name if call5 else None}"
         )
     return ok
 

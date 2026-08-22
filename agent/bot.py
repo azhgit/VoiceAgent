@@ -30,6 +30,7 @@ from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.workers.runner import WorkerRunner
 
+from call_close import CallCloseProcessor, CloseCallRequestedFrame
 from call_transfer import TRANSFER_MESSAGES
 from latency_observer import LatencyLogObserver
 from silence_timeout import SilenceTimeoutProcessor
@@ -85,13 +86,16 @@ SYSTEM_INSTRUCTION = (
     "   - urgent: call transfer_and_end_call with reason "
     "'urgent_no_availability'.\n"
     "   - non_urgent: tell them nothing's open in the next week, but "
-    "someone will call back as soon as a slot opens up.\n"
+    "someone will call back as soon as a slot opens up, then call "
+    "end_call.\n"
     "3. Once the caller picks a slot, get their name and phone number, "
     "then read both back and get an explicit yes before booking - "
     "STT can mishear a name or a digit and there'd be no other way to "
     "catch it. Only after they confirm, call book_appointment with that "
-    "exact slot, and read back the confirmed time and technician name "
-    "to close the call.\n"
+    "exact slot, read back the confirmed time and technician name to "
+    "close the call, then call end_call.\n"
+    "Call end_call right after any of these natural conclusions - don't "
+    "just stop talking and wait for the caller to hang up.\n"
 )
 KICKOFF_MESSAGE = (
     "The caller just connected. Greet them in one short sentence as the "
@@ -170,6 +174,18 @@ def build_tool_schemas() -> list[FunctionSchema]:
                 },
             },
             required=["reason"],
+        ),
+        FunctionSchema(
+            name="end_call",
+            description=(
+                "End the call after a natural conclusion - a confirmed booking, "
+                "or telling a non-urgent caller someone will call back. Call this "
+                "right after saying the closing line so the call actually hangs "
+                "up instead of sitting there waiting for the caller to do it. "
+                "Don't use this for transfers - use transfer_and_end_call instead."
+            ),
+            properties={},
+            required=[],
         ),
     ]
 
@@ -254,9 +270,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             {"transferred": True}, properties=FunctionCallResultProperties(run_llm=False)
         )
 
+    async def end_call(params: FunctionCallParams):
+        # Unlike transfer_and_end_call, the closing line here is the LLM's
+        # own normal text response (already flowing through the regular
+        # llm->tts path), not a fixed phrase we push ourselves - this tool
+        # just signals "hang up after that line finishes." CallCloseProcessor
+        # does the actual waiting/hangup once this frame reaches it.
+        await llm.push_frame(CloseCallRequestedFrame(), FrameDirection.DOWNSTREAM)
+        await params.result_callback(
+            {"closing": True}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+
     llm.register_function("check_availability", check_availability)
     llm.register_function("book_appointment", book_appointment)
     llm.register_function("transfer_and_end_call", transfer_and_end_call)
+    llm.register_function("end_call", end_call)
 
     tools = build_tool_schemas()
 
@@ -300,6 +328,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             SilenceTimeoutProcessor(),
             llm,
             tts,
+            # Unlike the two watchers above, this must come AFTER llm: the
+            # end_call tool pushes CloseCallRequestedFrame from llm's own
+            # position, which flows downstream from there - a processor
+            # sitting upstream of llm would never see it. Placed after tts
+            # (rather than between llm and tts) for direct access to
+            # transport.output()'s upstream-broadcast Bot*SpeakingFrame
+            # without relying on tts's forwarding, though that's confirmed
+            # reliable too (see the comment above).
+            CallCloseProcessor(),
             transport.output(),
             assistant_aggregator,
         ]
