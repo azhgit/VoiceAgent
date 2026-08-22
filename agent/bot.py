@@ -86,8 +86,11 @@ SYSTEM_INSTRUCTION = (
     "   - non_urgent: tell them nothing's open in the next week, but "
     "someone will call back as soon as a slot opens up.\n"
     "3. Once the caller picks a slot, get their name and phone number, "
-    "call book_appointment with that exact slot, and read back the "
-    "confirmed time and technician name to close the call.\n"
+    "then read both back and get an explicit yes before booking - "
+    "STT can mishear a name or a digit and there'd be no other way to "
+    "catch it. Only after they confirm, call book_appointment with that "
+    "exact slot, and read back the confirmed time and technician name "
+    "to close the call.\n"
 )
 KICKOFF_MESSAGE = (
     "The caller just connected. Greet them in one short sentence as the "
@@ -275,6 +278,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             transport.input(),
             stt,
             user_aggregator,  # emits UserStartedSpeakingFrame - must come before the watcher below
+            # Must come before llm/tts: its check-in/goodbye TTSSpeakFrame and
+            # EndFrame are pushed downstream and need to pass through both to
+            # actually be synthesized. It still sees Bot*SpeakingFrame despite
+            # sitting upstream of tts/transport.output() - those are emitted
+            # there in both directions, and tts/llm forward the upstream copy
+            # back through here (transports/base_output.py's _bot_started/
+            # stopped_speaking, tts_service.py's BotStartedSpeakingFrame
+            # handling, and AnthropicLLMService's else-branch passthrough).
             SilenceTimeoutProcessor(),
             llm,
             tts,

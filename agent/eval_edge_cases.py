@@ -12,6 +12,7 @@ run (a handful of short requests). Run manually: python eval_edge_cases.py
 
 import json
 import os
+import re
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -134,6 +135,66 @@ def check_unclear_second_attempt(client, tools) -> bool:
     return ok
 
 
+def check_confirms_name_and_phone_before_booking(client, tools) -> bool:
+    messages = [
+        {"role": "user", "content": "The caller just connected."},
+        {"role": "assistant", "content": GREETING},
+        {"role": "user", "content": "My bathroom faucet has been dripping for about a week."},
+    ]
+    resp1 = ask(client, tools, messages)
+    call1 = first_tool_use(resp1)
+    if not call1 or call1.name != "check_availability":
+        print(f"  FAIL: expected check_availability first, got {call1.name if call1 else None}")
+        return False
+
+    messages.append({"role": "assistant", "content": resp1.content})
+    messages.append(
+        tool_result(
+            call1,
+            {"slots": [{"technician_id": 1, "technician_name": "Mike Alvarez", "time_slot": "2030-06-10T09:00:00"}]},
+        )
+    )
+    resp2 = ask(client, tools, messages)
+    call2 = first_tool_use(resp2)
+    if call2 is not None:
+        print(f"  FAIL: expected the model to read back the slot as text, got a tool call ({call2.name})")
+        return False
+
+    messages.append({"role": "assistant", "content": resp2.content})
+    messages.append(
+        {
+            "role": "user",
+            "content": "That works. This is Jamie Rivera, phone number 555-042-8871.",
+        }
+    )
+    resp3 = ask(client, tools, messages)
+    call3 = first_tool_use(resp3)
+    ok = call3 is None
+    if not ok:
+        print(
+            f"  FAIL: expected the model to read back name/phone and ask for confirmation "
+            f"before booking, but it called {call3.name} immediately"
+        )
+        return False
+
+    messages.append({"role": "assistant", "content": resp3.content})
+    messages.append({"role": "user", "content": "Yes, that's correct."})
+    resp4 = ask(client, tools, messages)
+    call4 = first_tool_use(resp4)
+    ok = bool(
+        call4
+        and call4.name == "book_appointment"
+        and call4.input.get("customer_name") == "Jamie Rivera"
+        and "5550428871" in re.sub(r"\D", "", call4.input.get("customer_phone", ""))
+    )
+    if not ok:
+        print(
+            f"  FAIL: expected book_appointment with the confirmed name/phone, got "
+            f"{call4.name if call4 else None} {call4.input if call4 else ''}"
+        )
+    return ok
+
+
 def main():
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     tools = AnthropicLLMAdapter().to_provider_tools_format(
@@ -145,6 +206,10 @@ def main():
         ("non-urgent + no availability -> no transfer", check_non_urgent_no_availability),
         ("unclear once -> asks to repeat, no transfer", check_unclear_first_attempt),
         ("unclear twice -> transfer", check_unclear_second_attempt),
+        (
+            "confirms name/phone before booking",
+            check_confirms_name_and_phone_before_booking,
+        ),
     ]
 
     passed = 0

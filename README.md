@@ -111,8 +111,10 @@ cp ../.env.example ../.env            # fill in real API keys
 .venv/bin/python bot.py
 ```
 
-For a real call, tunnel the agent's WebSocket endpoint with ngrok and point
-a Twilio phone number's webhook at it — not yet done, see below.
+For a real call: [docs/live-call-runbook.md](docs/live-call-runbook.md)
+covers the ngrok tunnel, Twilio webhook config, and what to actually say
+on the call to exercise every branch (booking, urgent/no-slot handoff,
+barge-in, silence timeout, unclear speech).
 
 ## Testing
 
@@ -135,7 +137,8 @@ None of this replaces an actual phone call. See below.
   the CRM against itself, the dispatch logic against the real LLM API, the
   silence timeout against a real (but transport-less) pipeline — but nothing
   has gone through Twilio + Deepgram + ElevenLabs end-to-end yet. That needs
-  a live call, which needs a human on a phone.
+  a live call, which needs a human on a phone; see
+  [docs/live-call-runbook.md](docs/live-call-runbook.md).
 - **VAD threshold tuning.** The knobs exist; the values are still defaults.
 - **Demo recording and latency chart with real data** — `visualize_latency.py`
   works against synthetic data; it needs a real call's `latency_log.jsonl`
