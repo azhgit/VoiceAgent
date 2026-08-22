@@ -150,7 +150,7 @@ def check_confirms_name_and_phone_before_booking(client, tools) -> bool:
     messages.append(
         tool_result(
             call1,
-            {"slots": [{"technician_id": 1, "technician_name": "Mike Alvarez", "time_slot": "2026-08-25T09:00:00"}]},
+            {"slots": [{"technician_id": 1, "technician_name": "Mike Alvarez", "time_slot": "2030-06-10T09:00:00"}]},
         )
     )
     resp2 = ask(client, tools, messages)
@@ -163,7 +163,7 @@ def check_confirms_name_and_phone_before_booking(client, tools) -> bool:
     messages.append(
         {
             "role": "user",
-            "content": "Tuesday at 9am works. This is Jamie Rivera, phone number 555-042-8871.",
+            "content": "That works. This is Jamie Rivera, phone number 555-042-8871.",
         }
     )
     resp3 = ask(client, tools, messages)

@@ -52,7 +52,10 @@ class SilenceTimeoutProcessor(FrameProcessor):
         self._playback_grace_secs = playback_grace_secs
         self._next_wait_secs = timeout_secs
         self._triggers = 0
-        self._bot_speaking = False
+        # Starts True so the watcher can't fire before the bot's first turn
+        # even begins - the very first BotStoppedSpeakingFrame is what
+        # actually opens the caller-silence window (see class docstring).
+        self._bot_speaking = True
         self._activity_event = asyncio.Event()
         self._timeout_task = None
 
