@@ -278,6 +278,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             transport.input(),
             stt,
             user_aggregator,  # emits UserStartedSpeakingFrame - must come before the watcher below
+            # Must come before llm/tts: its check-in/goodbye TTSSpeakFrame and
+            # EndFrame are pushed downstream and need to pass through both to
+            # actually be synthesized. It still sees Bot*SpeakingFrame despite
+            # sitting upstream of tts/transport.output() - those are emitted
+            # there in both directions, and tts/llm forward the upstream copy
+            # back through here (transports/base_output.py's _bot_started/
+            # stopped_speaking, tts_service.py's BotStartedSpeakingFrame
+            # handling, and AnthropicLLMService's else-branch passthrough).
             SilenceTimeoutProcessor(),
             llm,
             tts,
