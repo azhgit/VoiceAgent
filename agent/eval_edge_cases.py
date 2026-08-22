@@ -12,6 +12,7 @@ run (a handful of short requests). Run manually: python eval_edge_cases.py
 
 import json
 import os
+import re
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -184,7 +185,7 @@ def check_confirms_name_and_phone_before_booking(client, tools) -> bool:
         call4
         and call4.name == "book_appointment"
         and call4.input.get("customer_name") == "Jamie Rivera"
-        and "5550428871" in call4.input.get("customer_phone", "").replace("-", "").replace(" ", "")
+        and "5550428871" in re.sub(r"\D", "", call4.input.get("customer_phone", ""))
     )
     if not ok:
         print(

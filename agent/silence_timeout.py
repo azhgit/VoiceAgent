@@ -24,10 +24,14 @@ class SilenceTimeoutProcessor(FrameProcessor):
     and ends the call.
 
     The waiting window only starts once the bot has actually stopped
-    speaking (BotStoppedSpeakingFrame) and is paused while the bot is
-    speaking (BotStartedSpeakingFrame) - otherwise a slow LLM/TTS turn
-    eats into the caller's silence budget, and the check-in can fire right
-    as the bot finishes talking instead of after real caller silence.
+    speaking (BotStoppedSpeakingFrame) and is paused for the entire span
+    from the caller starting to talk (UserStartedSpeakingFrame) through
+    the bot's next BotStoppedSpeakingFrame - covering both the caller's
+    own speech and the LLM/TTS generation time that follows it, not just
+    audio playback (BotStartedSpeakingFrame..BotStoppedSpeakingFrame).
+    Otherwise a slow turn - caller talking, or the bot thinking, or the
+    bot speaking - eats into the caller's silence budget, and the
+    check-in can fire mid-turn instead of after real caller silence.
     The escalation counter (_triggers) only resets on the caller actually
     speaking (UserStartedSpeakingFrame), not on BotStoppedSpeakingFrame -
     otherwise the check-in's own TTS turn would reset it and stage 2
@@ -55,7 +59,7 @@ class SilenceTimeoutProcessor(FrameProcessor):
         # Starts True so the watcher can't fire before the bot's first turn
         # even begins - the very first BotStoppedSpeakingFrame is what
         # actually opens the caller-silence window (see class docstring).
-        self._bot_speaking = True
+        self._bot_turn_active = True
         self._activity_event = asyncio.Event()
         self._timeout_task = None
 
@@ -67,12 +71,16 @@ class SilenceTimeoutProcessor(FrameProcessor):
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._triggers = 0
             self._next_wait_secs = self._timeout_secs
+            # Closes the window for the caller's own speech and the LLM/TTS
+            # generation time that follows it; only the next
+            # BotStoppedSpeakingFrame reopens it.
+            self._bot_turn_active = True
             self._activity_event.set()
         elif isinstance(frame, BotStartedSpeakingFrame):
-            self._bot_speaking = True
+            self._bot_turn_active = True
             self._activity_event.set()  # don't let a timeout land mid-speech
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            self._bot_speaking = False
+            self._bot_turn_active = False
             # First wait after a bot turn gets extra slack for any audio
             # still draining out; later waits during genuine silence don't.
             self._next_wait_secs = self._timeout_secs + self._playback_grace_secs
@@ -92,9 +100,10 @@ class SilenceTimeoutProcessor(FrameProcessor):
                 await asyncio.wait_for(self._activity_event.wait(), timeout=wait_secs)
                 self._activity_event.clear()
             except TimeoutError:
-                if self._bot_speaking:
-                    # A long bot turn is still in progress - not caller
-                    # silence, just keep waiting for it to finish.
+                if self._bot_turn_active:
+                    # The caller just spoke, or a long bot turn is still in
+                    # progress (thinking or talking) - not caller silence,
+                    # just keep waiting for it to finish.
                     continue
                 self._triggers += 1
                 if self._triggers == 1:

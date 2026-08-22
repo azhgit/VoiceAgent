@@ -27,13 +27,13 @@ right flags. This is purely an infra/config checklist.
 ```bash
 cd crm
 .venv/bin/python seed.py          # reset to clean demo data
-.venv/bin/uvicorn main:app --port 8001
+.venv/bin/uvicorn main:app --port 8000
 ```
 
-8001, not 8000 - port 8000 may already be taken by another project on your
-machine (`lsof -nP -iTCP:8000 -sTCP:LISTEN` to check). Leave this running.
-Confirm `CRM_BASE_URL` in `.env` matches whatever port you actually use
-here.
+Leave this running. If port 8000 is already taken by another project on
+your machine (`lsof -nP -iTCP:8000 -sTCP:LISTEN` to check), use `--port
+8001` instead — just make sure `CRM_BASE_URL` in `.env` matches whatever
+port you actually use here.
 
 ## 2. Start ngrok
 
