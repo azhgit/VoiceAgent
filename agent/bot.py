@@ -34,7 +34,7 @@ from call_close import CallCloseProcessor, CloseCallRequestedFrame
 from call_transfer import TRANSFER_MESSAGES
 from latency_observer import LatencyLogObserver
 from silence_timeout import SilenceTimeoutProcessor
-from thinking_filler import ThinkingFillerProcessor
+from thinking_filler import ThinkingFillerProcessor, ToolCallStartedFrame
 
 load_dotenv(override=True)
 
@@ -219,6 +219,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     crm_client = httpx.AsyncClient(base_url=CRM_BASE_URL, timeout=5.0)
 
     async def check_availability(params: FunctionCallParams):
+        # Arms ThinkingFillerProcessor for this CRM round trip - see
+        # ToolCallStartedFrame's docstring for why it's pushed here rather
+        # than on every LLM turn.
+        await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
         specialty = params.arguments["specialty"]
         urgency = params.arguments["urgency"]
         try:
@@ -233,6 +237,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         await params.result_callback({"slots": response.json()})
 
     async def book_appointment(params: FunctionCallParams):
+        await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
         args = params.arguments
         try:
             response = await crm_client.post(
@@ -312,30 +317,33 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         [
             transport.input(),
             stt,
-            user_aggregator,  # emits UserStartedSpeakingFrame - must come before the watchers below
-            # Both watchers below must come before llm/tts: their injected
-            # TTSSpeakFrame (and SilenceTimeoutProcessor's EndFrame) are
-            # pushed downstream and need to pass through both to actually be
-            # synthesized. They still see Bot*SpeakingFrame despite sitting
-            # upstream of tts/transport.output() - those are emitted there in
-            # both directions, and tts/llm forward the upstream copy back
-            # through here (transports/base_output.py's _bot_started/
+            user_aggregator,  # emits UserStartedSpeakingFrame - must come before the watcher below
+            # Must come before llm/tts: its check-in/goodbye TTSSpeakFrame and
+            # EndFrame are pushed downstream and need to pass through both to
+            # actually be synthesized. It still sees Bot*SpeakingFrame despite
+            # sitting upstream of tts/transport.output() - those are emitted
+            # there in both directions, and tts/llm forward the upstream copy
+            # back through here (transports/base_output.py's _bot_started/
             # stopped_speaking, tts_service.py's BotStartedSpeakingFrame
             # handling, and AnthropicLLMService's else-branch passthrough).
-            # The two are independent pure observers (neither drops/mutates
-            # frames, no shared state) so their relative order doesn't matter.
-            ThinkingFillerProcessor(),
             SilenceTimeoutProcessor(),
             llm,
+            # Must come after llm, before tts: check_availability/
+            # book_appointment push ToolCallStartedFrame from llm's own
+            # position (flows downstream from there, so a processor sitting
+            # upstream of llm would never see it), and its own injected
+            # TTSSpeakFrame needs to reach tts to actually be synthesized -
+            # sitting after tts like CallCloseProcessor below would bypass
+            # tts entirely. Still sees Bot*SpeakingFrame via tts's upstream
+            # forwarding (confirmed reliable, see the comment above).
+            ThinkingFillerProcessor(),
             tts,
-            # Unlike the two watchers above, this must come AFTER llm: the
-            # end_call tool pushes CloseCallRequestedFrame from llm's own
-            # position, which flows downstream from there - a processor
-            # sitting upstream of llm would never see it. Placed after tts
-            # (rather than between llm and tts) for direct access to
-            # transport.output()'s upstream-broadcast Bot*SpeakingFrame
-            # without relying on tts's forwarding, though that's confirmed
-            # reliable too (see the comment above).
+            # Unlike the two watchers above, this doesn't inject its own
+            # TTSSpeakFrame (only EndFrame, which doesn't need to pass
+            # through tts), so it sits after tts for direct access to
+            # transport.output()'s upstream-broadcast Bot*SpeakingFrame.
+            # end_call's CloseCallRequestedFrame (pushed from llm's
+            # position) still reaches it fine flowing downstream through tts.
             CallCloseProcessor(),
             transport.output(),
             assistant_aggregator,

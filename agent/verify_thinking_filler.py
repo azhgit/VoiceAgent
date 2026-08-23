@@ -12,14 +12,13 @@ from pipecat.frames.frames import (
     Frame,
     TTSSpeakFrame,
     UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
-from thinking_filler import FILLER_PHRASES, ThinkingFillerProcessor
+from thinking_filler import FILLER_PHRASES, ThinkingFillerProcessor, ToolCallStartedFrame
 
 
 class Sink(FrameProcessor):
@@ -65,7 +64,7 @@ def fillers(sink):
 
 
 async def scenario_fast_turn(worker, sink, T):
-    await worker.queue_frames([UserStoppedSpeakingFrame()])
+    await worker.queue_frames([ToolCallStartedFrame()])
     await asyncio.sleep(T * 0.5)
     await worker.queue_frames([BotStartedSpeakingFrame()])
     await asyncio.sleep(T * 1.5)
@@ -74,7 +73,7 @@ async def scenario_fast_turn(worker, sink, T):
 
 async def scenario_slow_turn_fires_once(worker, sink, T):
     ref = time.monotonic()
-    await worker.queue_frames([UserStoppedSpeakingFrame()])
+    await worker.queue_frames([ToolCallStartedFrame()])
 
     await asyncio.sleep(T * 0.5)
     assert len(fillers(sink)) == 0, "fired too early"
@@ -92,18 +91,18 @@ async def scenario_slow_turn_fires_once(worker, sink, T):
 
 
 async def scenario_caller_barges_in(worker, sink, T):
-    await worker.queue_frames([UserStoppedSpeakingFrame()])
+    await worker.queue_frames([ToolCallStartedFrame()])
     await asyncio.sleep(T * 0.5)
     await worker.queue_frames([UserStartedSpeakingFrame()])
     await asyncio.sleep(T * 1.5)
     assert len(fillers(sink)) == 0, "should not speak over the caller"
     # Pass-through fidelity: every pushed frame reached the sink, nothing swallowed.
-    assert any(isinstance(f, UserStoppedSpeakingFrame) for f in sink.frames)
+    assert any(isinstance(f, ToolCallStartedFrame) for f in sink.frames)
     assert any(isinstance(f, UserStartedSpeakingFrame) for f in sink.frames)
 
 
 async def scenario_second_turn_gets_fresh_chance(worker, sink, T):
-    await worker.queue_frames([UserStoppedSpeakingFrame()])
+    await worker.queue_frames([ToolCallStartedFrame()])
     await asyncio.sleep(T * 1.2)
     assert len(fillers(sink)) == 1, "expected first filler"
 
@@ -111,7 +110,7 @@ async def scenario_second_turn_gets_fresh_chance(worker, sink, T):
     await asyncio.sleep(0.02)
     await worker.queue_frames([UserStartedSpeakingFrame()])
     await asyncio.sleep(0.02)
-    await worker.queue_frames([UserStoppedSpeakingFrame()])
+    await worker.queue_frames([ToolCallStartedFrame()])
     await asyncio.sleep(T * 1.2)
 
     assert len(fillers(sink)) == 2, f"expected a second filler, got {len(fillers(sink))}"
