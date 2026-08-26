@@ -7,3 +7,4 @@ venv/
 *.jsonl
 latency_chart.png
 .DS_Store
+.coverage
