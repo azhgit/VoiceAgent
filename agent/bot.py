@@ -32,6 +32,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from call_close import CallCloseProcessor, CloseCallRequestedFrame
 from call_transfer import TRANSFER_MESSAGES
+from caller_id import lookup_caller_number, normalize_phone
 from latency_observer import LatencyLogObserver
 from silence_timeout import SilenceTimeoutProcessor
 from thinking_filler import ThinkingFillerProcessor, ToolCallStartedFrame
@@ -70,6 +71,25 @@ SYSTEM_INSTRUCTION = (
     "emergency, not a scheduling call. Don't classify it or check "
     "availability - immediately call transfer_and_end_call with reason "
     "'life_threatening_emergency'. This check overrides every rule below.\n\n"
+    "If the caller wants to check, reschedule, or cancel an EXISTING "
+    "appointment (not describing a new problem), call find_appointment "
+    "first - it looks up the caller's own record automatically off the "
+    "real calling number, so don't ask them for their phone number for "
+    "this. If it comes back unverified, call transfer_and_end_call with "
+    "reason 'cannot_verify_caller' right away - verification only works "
+    "through find_appointment, don't try asking for their phone number as "
+    "a substitute. If verified with no appointment found, say so, then "
+    "fall through to the normal flow below if they still want service. If "
+    "verified with an appointment found, read back its time and "
+    "technician, then ask whether they want to reschedule or cancel it:\n"
+    "   - Cancel: get an explicit yes, call cancel_appointment with that "
+    "appointment_id, confirm it's cancelled, then call end_call.\n"
+    "   - Reschedule: run the normal check_availability + book_appointment "
+    "flow below to book the new slot FIRST. Only after that booking "
+    "succeeds, call cancel_appointment on the old appointment_id, confirm "
+    "the change, then call end_call. Booking the new slot before "
+    "cancelling the old one means they're never left with nothing if the "
+    "new booking fails.\n\n"
     "For every caller:\n"
     "1. Ask what's wrong if they haven't said, then classify BOTH the "
     "specialty and the urgency from their description. Use these fixed "
@@ -165,6 +185,33 @@ def build_tool_schemas() -> list[FunctionSchema]:
             required=["technician_id", "time_slot", "customer_name", "customer_phone", "urgency"],
         ),
         FunctionSchema(
+            name="find_appointment",
+            description=(
+                "Look up any existing booked appointment for this caller, "
+                "verified against the real calling phone number - never a "
+                "number the caller states. Call this before doing anything else "
+                "when they want to check, reschedule, or cancel an existing "
+                "appointment. Takes no arguments."
+            ),
+            properties={},
+            required=[],
+        ),
+        FunctionSchema(
+            name="cancel_appointment",
+            description=(
+                "Cancel one existing appointment, by the appointment_id returned "
+                "from find_appointment. Only succeeds if it belongs to this "
+                "verified caller."
+            ),
+            properties={
+                "appointment_id": {
+                    "type": "integer",
+                    "description": "appointment_id from a find_appointment result.",
+                },
+            },
+            required=["appointment_id"],
+        ),
+        FunctionSchema(
             name="transfer_and_end_call",
             description=(
                 "Speak a fixed line for the given reason, then end the call. "
@@ -230,6 +277,25 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         headers={"X-API-Key": os.getenv("CRM_API_KEY", "")},
     )
 
+    # Lazy, per-call cache for the Twilio-verified Caller ID - looked up at
+    # most once per call (only if find_appointment is actually invoked, not
+    # on every call) since it costs a Twilio REST round trip. A dict cell
+    # rather than a bare variable so the closures below can both read and
+    # write it without `nonlocal`.
+    _caller_number_cache: dict[str, str | None] = {}
+    # One-shot flag: set when cancel_appointment verifies+cancels an old
+    # appointment, consumed by the very next book_appointment call so only
+    # that rebook - not any unrelated future booking in the same call -
+    # skips the CRM's per-phone rate limit. See crm/appointments.py.
+    _reschedule_state = {"exempt_next_booking": False}
+
+    async def get_verified_caller_number() -> str | None:
+        if "value" not in _caller_number_cache:
+            call_data = getattr(runner_args, "call_data", None) or {}
+            call_sid = call_data.get("call_id")
+            _caller_number_cache["value"] = await lookup_caller_number(call_sid)
+        return _caller_number_cache["value"]
+
     async def check_availability(params: FunctionCallParams):
         # Arms ThinkingFillerProcessor for this CRM round trip - see
         # ToolCallStartedFrame's docstring for why it's pushed here rather
@@ -251,6 +317,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def book_appointment(params: FunctionCallParams):
         await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
         args = params.arguments
+        headers = {}
+        if _reschedule_state["exempt_next_booking"]:
+            headers["X-Skip-Rate-Limit"] = "true"
+            _reschedule_state["exempt_next_booking"] = False
         try:
             response = await crm_client.post(
                 "/appointments",
@@ -261,6 +331,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                     "customer_phone": args["customer_phone"],
                     "urgency": args["urgency"],
                 },
+                headers=headers,
             )
             response.raise_for_status()
         except httpx.HTTPError as e:
@@ -272,6 +343,60 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             await params.result_callback({"error": "booking_failed"})
             return
         await params.result_callback({"appointment": response.json()})
+
+    async def find_appointment(params: FunctionCallParams):
+        await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
+        caller_number = await get_verified_caller_number()
+        if not caller_number:
+            await params.result_callback({"verified": False})
+            return
+        try:
+            response = await crm_client.get(
+                "/appointments", params={"customer_phone": caller_number, "status": "booked"}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.error(f"CRM appointment lookup failed: {e}")
+            await params.result_callback({"error": "crm_unavailable"})
+            return
+        await params.result_callback({"verified": True, "appointments": response.json()})
+
+    async def cancel_appointment(params: FunctionCallParams):
+        await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
+        appointment_id = params.arguments["appointment_id"]
+        caller_number = await get_verified_caller_number()
+        if not caller_number:
+            await params.result_callback({"verified": False})
+            return
+        try:
+            response = await crm_client.get(f"/appointments/{appointment_id}")
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.error(f"CRM appointment lookup failed: {e}")
+            await params.result_callback({"error": "crm_unavailable"})
+            return
+        # Re-verified here, in code, against the real appointment record -
+        # not just trusted from find_appointment's result - so a caller
+        # can't talk the LLM into cancelling an appointment_id that isn't
+        # theirs by simply asking for a different number.
+        if normalize_phone(response.json()["customer_phone"]) != normalize_phone(caller_number):
+            logger.warning(
+                f"cancel_appointment: appointment {appointment_id} does not belong to "
+                "the verified caller"
+            )
+            await params.result_callback({"error": "not_your_appointment"})
+            return
+        try:
+            response = await crm_client.patch(
+                f"/appointments/{appointment_id}", params={"status": "cancelled"}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.error(f"CRM cancellation failed: {e}")
+            await params.result_callback({"error": "crm_unavailable"})
+            return
+        _reschedule_state["exempt_next_booking"] = True
+        await params.result_callback({"cancelled": True})
 
     async def transfer_and_end_call(params: FunctionCallParams):
         # Speaks the transfer line and ends the call directly, rather than
@@ -300,6 +425,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     llm.register_function("check_availability", check_availability)
     llm.register_function("book_appointment", book_appointment)
+    llm.register_function("find_appointment", find_appointment)
+    llm.register_function("cancel_appointment", cancel_appointment)
     llm.register_function("transfer_and_end_call", transfer_and_end_call)
     llm.register_function("end_call", end_call)
 

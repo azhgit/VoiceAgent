@@ -247,6 +247,53 @@ def check_gas_leak_emergency(client, tools) -> bool:
     return ok
 
 
+def check_modify_request_triggers_find_appointment(client, tools) -> bool:
+    messages = [
+        {"role": "user", "content": "The caller just connected."},
+        {"role": "assistant", "content": GREETING},
+        {"role": "user", "content": "I need to reschedule my appointment from earlier this week."},
+    ]
+    resp1 = ask(client, tools, messages)
+    call1 = first_tool_use(resp1)
+    ok = bool(call1 and call1.name == "find_appointment")
+    if not ok:
+        print(
+            f"  FAIL: expected find_appointment first (not asking for a phone number "
+            f"or booking directly), got {call1.name if call1 else None}"
+        )
+    return ok
+
+
+def check_unverified_caller_transferred(client, tools) -> bool:
+    messages = [
+        {"role": "user", "content": "The caller just connected."},
+        {"role": "assistant", "content": GREETING},
+        {"role": "user", "content": "I need to cancel my existing appointment."},
+    ]
+    resp1 = ask(client, tools, messages)
+    call1 = first_tool_use(resp1)
+    if not call1 or call1.name != "find_appointment":
+        print(f"  FAIL: expected find_appointment first, got {call1.name if call1 else None}")
+        return False
+
+    messages.append({"role": "assistant", "content": resp1.content})
+    messages.append(tool_result(call1, {"verified": False}))
+    resp2 = ask(client, tools, messages)
+    call2 = first_tool_use(resp2)
+    ok = bool(
+        call2
+        and call2.name == "transfer_and_end_call"
+        and call2.input.get("reason") == "cannot_verify_caller"
+    )
+    if not ok:
+        print(
+            f"  FAIL: expected transfer_and_end_call(cannot_verify_caller) when "
+            f"find_appointment reports unverified, got {call2.name if call2 else None} "
+            f"{call2.input if call2 else ''}"
+        )
+    return ok
+
+
 def main():
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     tools = AnthropicLLMAdapter().to_provider_tools_format(
@@ -255,6 +302,8 @@ def main():
 
     checks = [
         ("gas leak -> immediate 911 escalation, no classification", check_gas_leak_emergency),
+        ("modify request -> find_appointment first", check_modify_request_triggers_find_appointment),
+        ("unverified caller -> transfer, not phone-number fallback", check_unverified_caller_transferred),
         ("urgent + no availability -> transfer", check_urgent_no_availability),
         ("non-urgent + no availability -> no transfer", check_non_urgent_no_availability),
         ("unclear once -> asks to repeat, no transfer", check_unclear_first_attempt),

@@ -1,6 +1,7 @@
+import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,19 @@ router = APIRouter(prefix="/appointments", tags=["appointments"])
 
 STATUSES = {"booked", "completed", "cancelled"}
 URGENCIES = {"urgent", "non_urgent"}
+
+
+def _normalize_phone(value: str) -> str:
+    """Digits only, dropping a leading US/Canada country code - so Twilio's
+    E.164 "+15550428871" matches a caller-stated "555-042-8871", not just a
+    formatting difference (same fix as eval_edge_cases.py's phone-match
+    check) but a genuine country-code mismatch: real callers state 10-digit
+    numbers, Twilio's Caller ID always includes the +1.
+    """
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits
 
 
 class AppointmentCreate(BaseModel):
@@ -38,6 +52,7 @@ def _serialize(a: Appointment) -> dict:
 def list_appointments(
     technician_id: int | None = None,
     status: str | None = None,
+    customer_phone: str | None = None,
     db: Session = Depends(get_db),
 ):
     q = db.query(Appointment)
@@ -45,7 +60,15 @@ def list_appointments(
         q = q.filter(Appointment.technician_id == technician_id)
     if status is not None:
         q = q.filter(Appointment.status == status)
-    return [_serialize(a) for a in q.order_by(Appointment.time_slot).all()]
+    appointments = q.order_by(Appointment.time_slot).all()
+    if customer_phone is not None:
+        # Digit-normalized comparison in Python, not a SQL filter - stored
+        # numbers and the caller's actual Twilio number can differ in
+        # formatting (dashes, country code) even when they're the same
+        # number. Fine at this table size (demo scale).
+        target = _normalize_phone(customer_phone)
+        appointments = [a for a in appointments if _normalize_phone(a.customer_phone) == target]
+    return [_serialize(a) for a in appointments]
 
 
 @router.get("/{appointment_id}")
@@ -57,8 +80,16 @@ def get_appointment(appointment_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("")
-def create_appointment(payload: AppointmentCreate, db: Session = Depends(get_db)):
-    if not check_rate_limit(payload.customer_phone):
+def create_appointment(
+    payload: AppointmentCreate,
+    db: Session = Depends(get_db),
+    x_skip_rate_limit: bool = Header(default=False, alias="X-Skip-Rate-Limit"),
+):
+    # Only the agent can set this header (it's the sole holder of the CRM
+    # API key), and only after code - not the LLM - has confirmed this
+    # booking is the rebook half of a Caller-ID-verified reschedule. See
+    # agent/bot.py's book_appointment for where it's actually set.
+    if not x_skip_rate_limit and not check_rate_limit(payload.customer_phone):
         raise HTTPException(
             status_code=429, detail="Too many booking attempts for this phone number"
         )

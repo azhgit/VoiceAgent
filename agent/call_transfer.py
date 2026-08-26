@@ -11,4 +11,8 @@ TRANSFER_MESSAGES = {
         "technician for. Please hang up right now and call 911, then get "
         "everyone out of the building."
     ),
+    "cannot_verify_caller": (
+        "I'm not able to verify this call to make changes to an existing "
+        "appointment, so I'm transferring you to a live dispatcher now."
+    ),
 }
