@@ -69,3 +69,35 @@ def test_booking_rate_limit_exceeded(client, technicians):
 
     resp = _book(client, technicians["mike"], future_slot(day_offset=2, hour=9), phone=phone)
     assert resp.status_code == 429
+
+
+def test_booking_rate_limit_skipped_with_header(client, technicians):
+    phone = "555-8888"
+    for i in range(3):
+        slot = future_slot(day_offset=1, hour=9 + i)
+        resp = _book(client, technicians["mike"], slot, phone=phone)
+        assert resp.status_code == 200
+
+    resp = client.post(
+        "/appointments",
+        json={
+            "technician_id": technicians["mike"],
+            "time_slot": future_slot(day_offset=2, hour=9),
+            "customer_name": "Carla",
+            "customer_phone": phone,
+            "urgency": "non_urgent",
+        },
+        headers={"X-Skip-Rate-Limit": "true"},
+    )
+    assert resp.status_code == 200
+
+
+def test_list_appointments_filters_by_phone_ignoring_formatting(client, technicians):
+    _book(client, technicians["mike"], future_slot(day_offset=1, hour=9), phone="555-042-8871")
+    _book(client, technicians["dana"], future_slot(day_offset=1, hour=10), phone="555-0101")
+
+    resp = client.get("/appointments", params={"customer_phone": "+1 (555) 042-8871"})
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 1
+    assert results[0]["customer_phone"] == "555-042-8871"
