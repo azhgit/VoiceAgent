@@ -6,4 +6,9 @@ TRANSFER_MESSAGES = {
         "I'm having trouble understanding you, so I'm transferring you to a live "
         "dispatcher now."
     ),
+    "life_threatening_emergency": (
+        "This is a life-threatening emergency, not something I can dispatch a "
+        "technician for. Please hang up right now and call 911, then get "
+        "everyone out of the building."
+    ),
 }

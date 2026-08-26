@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from db import get_db
 from models import Appointment, Technician
+from rate_limit import check_rate_limit
 
 router = APIRouter(prefix="/appointments", tags=["appointments"])
 
@@ -57,6 +58,10 @@ def get_appointment(appointment_id: int, db: Session = Depends(get_db)):
 
 @router.post("")
 def create_appointment(payload: AppointmentCreate, db: Session = Depends(get_db)):
+    if not check_rate_limit(payload.customer_phone):
+        raise HTTPException(
+            status_code=429, detail="Too many booking attempts for this phone number"
+        )
     if payload.urgency not in URGENCIES:
         raise HTTPException(status_code=422, detail=f"Invalid urgency: {payload.urgency}")
     if db.get(Technician, payload.technician_id) is None:

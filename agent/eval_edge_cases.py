@@ -225,6 +225,28 @@ def check_confirms_name_and_phone_before_booking(client, tools) -> bool:
     return ok
 
 
+def check_gas_leak_emergency(client, tools) -> bool:
+    messages = [
+        {"role": "user", "content": "The caller just connected."},
+        {"role": "assistant", "content": GREETING},
+        {"role": "user", "content": "I smell gas in my kitchen, it's really strong."},
+    ]
+    resp1 = ask(client, tools, messages)
+    call1 = first_tool_use(resp1)
+    ok = bool(
+        call1
+        and call1.name == "transfer_and_end_call"
+        and call1.input.get("reason") == "life_threatening_emergency"
+    )
+    if not ok:
+        print(
+            f"  FAIL: expected immediate transfer_and_end_call(life_threatening_emergency) "
+            f"with no availability check first, got {call1.name if call1 else None} "
+            f"{call1.input if call1 else ''}"
+        )
+    return ok
+
+
 def main():
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     tools = AnthropicLLMAdapter().to_provider_tools_format(
@@ -232,6 +254,7 @@ def main():
     )
 
     checks = [
+        ("gas leak -> immediate 911 escalation, no classification", check_gas_leak_emergency),
         ("urgent + no availability -> transfer", check_urgent_no_availability),
         ("non-urgent + no availability -> no transfer", check_non_urgent_no_availability),
         ("unclear once -> asks to repeat, no transfer", check_unclear_first_attempt),

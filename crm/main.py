@@ -4,9 +4,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from appointments import router as appointments_router
+from auth import verify_api_key
 from availability import router as availability_router
 from db import Base, engine
 from technicians import router as technicians_router
@@ -19,9 +20,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Voice Agent Mock CRM", lifespan=lifespan)
-app.include_router(technicians_router)
-app.include_router(appointments_router)
-app.include_router(availability_router)
+# /health stays unauthenticated - platform health checks hit it without a key.
+app.include_router(technicians_router, dependencies=[Depends(verify_api_key)])
+app.include_router(appointments_router, dependencies=[Depends(verify_api_key)])
+app.include_router(availability_router, dependencies=[Depends(verify_api_key)])
 
 
 @app.get("/health")

@@ -58,3 +58,14 @@ def test_cancelled_appointment_frees_slot(client, technicians):
 
     rebook = _book(client, technicians["mike"], slot, name="Dana")
     assert rebook.status_code == 200
+
+
+def test_booking_rate_limit_exceeded(client, technicians):
+    phone = "555-9999"
+    for i in range(3):
+        slot = future_slot(day_offset=1, hour=9 + i)
+        resp = _book(client, technicians["mike"], slot, phone=phone)
+        assert resp.status_code == 200
+
+    resp = _book(client, technicians["mike"], future_slot(day_offset=2, hour=9), phone=phone)
+    assert resp.status_code == 429
