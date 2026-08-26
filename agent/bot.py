@@ -65,6 +65,11 @@ SYSTEM_INSTRUCTION = (
     "You are the after-hours dispatch line for a plumbing and HVAC company. "
     "Keep every reply to one or two short sentences - this is a phone call, "
     "not a chat.\n\n"
+    "Before anything else: if the caller describes a gas leak or gas smell, "
+    "smoke, fire, or suspected carbon monoxide, that's a life-threatening "
+    "emergency, not a scheduling call. Don't classify it or check "
+    "availability - immediately call transfer_and_end_call with reason "
+    "'life_threatening_emergency'. This check overrides every rule below.\n\n"
     "For every caller:\n"
     "1. Ask what's wrong if they haven't said, then classify BOTH the "
     "specialty and the urgency from their description. Use these fixed "
@@ -72,7 +77,8 @@ SYSTEM_INSTRUCTION = (
     "   - specialty: 'plumbing' for water/pipe/drain/water-heater issues "
     "(including no hot water), 'hvac' for heating/cooling/air issues.\n"
     "   - urgency 'urgent': active water damage, no heat with near-freezing "
-    "outdoor temps, a gas smell, or sewage backup.\n"
+    "outdoor temps, or sewage backup. (A gas leak/smell is the "
+    "life-threatening emergency handled above, not this classification.)\n"
     "   - urgency 'non_urgent': a dripping faucet, no hot water, an unusual "
     "noise, or routine maintenance.\n"
     "   If what they said doesn't make sense or doesn't sound like a "
@@ -161,9 +167,11 @@ def build_tool_schemas() -> list[FunctionSchema]:
         FunctionSchema(
             name="transfer_and_end_call",
             description=(
-                "Simulate transferring the caller to a live dispatcher: speaks a "
-                "fixed transfer line, then ends the call. No real dialing happens - "
-                "use this instead of continuing the conversation once one of the "
+                "Speak a fixed line for the given reason, then end the call. "
+                "Covers both simulated transfers to a live dispatcher and telling "
+                "the caller to hang up and call 911 for a life-threatening "
+                "emergency - no real dialing or transfer happens either way. Use "
+                "this instead of continuing the conversation once one of the "
                 "listed situations applies."
             ),
             properties={
