@@ -224,7 +224,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    crm_client = httpx.AsyncClient(base_url=CRM_BASE_URL, timeout=5.0)
+    crm_client = httpx.AsyncClient(
+        base_url=CRM_BASE_URL,
+        timeout=5.0,
+        headers={"X-API-Key": os.getenv("CRM_API_KEY", "")},
+    )
 
     async def check_availability(params: FunctionCallParams):
         # Arms ThinkingFillerProcessor for this CRM round trip - see

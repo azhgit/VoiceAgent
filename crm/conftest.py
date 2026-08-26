@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_crm.db"
+os.environ["CRM_API_KEY"] = "test-api-key"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from db import Base, SessionLocal, engine
 from main import app
 from models import Technician
+from rate_limit import reset_rate_limits
 
 
 def future_slot(day_offset: int = 1, hour: int = 9) -> str:
@@ -27,9 +29,14 @@ def reset_db():
     Base.metadata.drop_all(bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def clear_rate_limits():
+    reset_rate_limits()
+
+
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(app, headers={"X-API-Key": os.environ["CRM_API_KEY"]})
 
 
 @pytest.fixture
