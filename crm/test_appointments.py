@@ -101,3 +101,52 @@ def test_list_appointments_filters_by_phone_ignoring_formatting(client, technici
     results = resp.json()
     assert len(results) == 1
     assert results[0]["customer_phone"] == "555-042-8871"
+
+
+def test_list_appointments_filters_by_technician_id(client, technicians):
+    _book(client, technicians["mike"], future_slot(day_offset=1, hour=9))
+    _book(client, technicians["dana"], future_slot(day_offset=1, hour=10))
+
+    resp = client.get("/appointments", params={"technician_id": technicians["mike"]})
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 1
+    assert results[0]["technician_id"] == technicians["mike"]
+
+
+def test_list_appointments_filters_by_status(client, technicians):
+    slot = future_slot(day_offset=1, hour=9)
+    booked = _book(client, technicians["mike"], slot).json()
+    client.patch(f"/appointments/{booked['id']}", params={"status": "cancelled"})
+    _book(client, technicians["dana"], future_slot(day_offset=1, hour=10))
+
+    resp = client.get("/appointments", params={"status": "cancelled"})
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 1
+    assert results[0]["id"] == booked["id"]
+
+
+def test_get_appointment_by_id(client, technicians):
+    booked = _book(client, technicians["mike"], future_slot()).json()
+
+    resp = client.get(f"/appointments/{booked['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == booked["id"]
+
+
+def test_get_unknown_appointment_404(client, technicians):
+    resp = client.get("/appointments/999")
+    assert resp.status_code == 404
+
+
+def test_update_status_invalid_rejected(client, technicians):
+    booked = _book(client, technicians["mike"], future_slot()).json()
+
+    resp = client.patch(f"/appointments/{booked['id']}", params={"status": "whenever"})
+    assert resp.status_code == 422
+
+
+def test_update_unknown_appointment_404(client, technicians):
+    resp = client.patch("/appointments/999", params={"status": "cancelled"})
+    assert resp.status_code == 404

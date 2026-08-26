@@ -7,3 +7,4 @@ python-multipart
 # test-only
 pytest
 httpx2
+coverage
