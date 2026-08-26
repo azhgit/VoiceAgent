@@ -30,9 +30,11 @@ from pipecat.transports.base_transport import BaseTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 from pipecat.workers.runner import WorkerRunner
 
+from call_close import CallCloseProcessor, CloseCallRequestedFrame
 from call_transfer import TRANSFER_MESSAGES
 from latency_observer import LatencyLogObserver
 from silence_timeout import SilenceTimeoutProcessor
+from thinking_filler import ThinkingFillerProcessor, ToolCallStartedFrame
 
 load_dotenv(override=True)
 
@@ -84,13 +86,16 @@ SYSTEM_INSTRUCTION = (
     "   - urgent: call transfer_and_end_call with reason "
     "'urgent_no_availability'.\n"
     "   - non_urgent: tell them nothing's open in the next week, but "
-    "someone will call back as soon as a slot opens up.\n"
+    "someone will call back as soon as a slot opens up, then call "
+    "end_call.\n"
     "3. Once the caller picks a slot, get their name and phone number, "
     "then read both back and get an explicit yes before booking - "
     "STT can mishear a name or a digit and there'd be no other way to "
     "catch it. Only after they confirm, call book_appointment with that "
-    "exact slot, and read back the confirmed time and technician name "
-    "to close the call.\n"
+    "exact slot, read back the confirmed time and technician name to "
+    "close the call, then call end_call.\n"
+    "Call end_call right after any of these natural conclusions - don't "
+    "just stop talking and wait for the caller to hang up.\n"
 )
 KICKOFF_MESSAGE = (
     "The caller just connected. Greet them in one short sentence as the "
@@ -170,6 +175,18 @@ def build_tool_schemas() -> list[FunctionSchema]:
             },
             required=["reason"],
         ),
+        FunctionSchema(
+            name="end_call",
+            description=(
+                "End the call after a natural conclusion - a confirmed booking, "
+                "or telling a non-urgent caller someone will call back. Call this "
+                "right after saying the closing line so the call actually hangs "
+                "up instead of sitting there waiting for the caller to do it. "
+                "Don't use this for transfers - use transfer_and_end_call instead."
+            ),
+            properties={},
+            required=[],
+        ),
     ]
 
 
@@ -179,6 +196,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         settings=AnthropicLLMService.Settings(
             model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             system_instruction=SYSTEM_INSTRUCTION,
+            # Not enable_prompt_caching=True: measured with eval_prompt_caching.py
+            # against the real API - Haiku 4.5 needs >=4096 tokens to actually
+            # cache anything, and SYSTEM_INSTRUCTION + tools + a turn is ~1400.
+            # Confirmed via cache_creation_input_tokens/cache_read_input_tokens
+            # in the response (both 0), not just inferred from timing. Revisit
+            # only if the prompt grows past that floor for other reasons.
         ),
     )
     stt = DeepgramSTTService(
@@ -196,6 +219,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     crm_client = httpx.AsyncClient(base_url=CRM_BASE_URL, timeout=5.0)
 
     async def check_availability(params: FunctionCallParams):
+        # Arms ThinkingFillerProcessor for this CRM round trip - see
+        # ToolCallStartedFrame's docstring for why it's pushed here rather
+        # than on every LLM turn.
+        await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
         specialty = params.arguments["specialty"]
         urgency = params.arguments["urgency"]
         try:
@@ -210,6 +237,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         await params.result_callback({"slots": response.json()})
 
     async def book_appointment(params: FunctionCallParams):
+        await llm.push_frame(ToolCallStartedFrame(), FrameDirection.DOWNSTREAM)
         args = params.arguments
         try:
             response = await crm_client.post(
@@ -247,9 +275,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             {"transferred": True}, properties=FunctionCallResultProperties(run_llm=False)
         )
 
+    async def end_call(params: FunctionCallParams):
+        # Unlike transfer_and_end_call, the closing line here is the LLM's
+        # own normal text response (already flowing through the regular
+        # llm->tts path), not a fixed phrase we push ourselves - this tool
+        # just signals "hang up after that line finishes." CallCloseProcessor
+        # does the actual waiting/hangup once this frame reaches it.
+        await llm.push_frame(CloseCallRequestedFrame(), FrameDirection.DOWNSTREAM)
+        await params.result_callback(
+            {"closing": True}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+
     llm.register_function("check_availability", check_availability)
     llm.register_function("book_appointment", book_appointment)
     llm.register_function("transfer_and_end_call", transfer_and_end_call)
+    llm.register_function("end_call", end_call)
 
     tools = build_tool_schemas()
 
@@ -288,7 +328,23 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             # handling, and AnthropicLLMService's else-branch passthrough).
             SilenceTimeoutProcessor(),
             llm,
+            # Must come after llm, before tts: check_availability/
+            # book_appointment push ToolCallStartedFrame from llm's own
+            # position (flows downstream from there, so a processor sitting
+            # upstream of llm would never see it), and its own injected
+            # TTSSpeakFrame needs to reach tts to actually be synthesized -
+            # sitting after tts like CallCloseProcessor below would bypass
+            # tts entirely. Still sees Bot*SpeakingFrame via tts's upstream
+            # forwarding (confirmed reliable, see the comment above).
+            ThinkingFillerProcessor(),
             tts,
+            # Unlike the two watchers above, this doesn't inject its own
+            # TTSSpeakFrame (only EndFrame, which doesn't need to pass
+            # through tts), so it sits after tts for direct access to
+            # transport.output()'s upstream-broadcast Bot*SpeakingFrame.
+            # end_call's CloseCallRequestedFrame (pushed from llm's
+            # position) still reaches it fine flowing downstream through tts.
+            CallCloseProcessor(),
             transport.output(),
             assistant_aggregator,
         ]
